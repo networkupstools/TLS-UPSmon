@@ -1,0 +1,101 @@
+README 2021-05-24 Roger Price
+
+            UPSmon.py - replacement for NUT upsmon
+            --------------------------------------
+
+UPSmon.py is a Python3 script which replaces upsmon, upssched and
+upssched-cmd. The configuration files upsmon.conf and upssched.conf
+are replaced by a single configuration file UPSmon.conf.  The current
+version of UPSmon.py is “experimental”, intended for experiment and
+demonstration.
+
+Principal differences between upsmon and UPSmon.py
+--------------------------------------------------
+
+The principal differences between NUT’s upsmon and UPSmon.py are:
+
+1. UPSmon.py is written in Python3 rather than K&R C. It is hoped that
+this use of a well known higher level language will encourage further
+experimentation. The script is in one single file rather than the many
+separate files used in NUT C code. Like the NUT C code, the script is
+not object oriented. To assist further development, the script
+provides 116 error and warning messages, and the -D and -Y debug
+options provide a detailed “walk-through” of the script’s operations.
+
+2. Unlike upsmon, UPSmon.py does not retain the parent process when
+forking to a nonprivileged user. This improves security, but implies
+that the non-privileged user such as nut has sudo rights for programs
+wall, notify-send and shutdown.
+
+3. UPSmon.py assumes that it will be managing a large number of
+physical and virtual UPS and other power supply units. The management
+may be of the type “master” or “slave” or simply as an observer with
+the master/slave shutdown decisions taken elsewhere.
+
+4. The UPS units, real and virtual, are collected into groups. Every
+UPS must be in exactly one group.
+
+5. All UPS’s must be individually identified. Unlike NUT, there are no
+“wildcard” UPS’s. Each UPS has a formal “fully qualified” name which
+is of the form group:ups@host:port , for example
+HB:heartbeat@bigbox:3493 , although shortened forms are used where
+there is no ambiguity.
+
+6. The configuration file UPSmon.conf is read by PLY, Python Lex and
+Yacc. This implies a slightly slower start-up than NUT but allows
+freer formats and many possibilities for future expansion.
+
+7. The upsmon.conf declarations DEADTIME, FINALDELAY, HOSTSYNC,
+NOCOMMWARNTIME and RBWARNTIME are not needed in UPSmon.conf since they
+are timers which can be expressed directly if needed.
+
+8. All communication between UPSmon.py and upsd is TLS encrypted. The
+version of OpenSSL used is too recent to be compatible with nut 2.7.4,
+so a shim front end for upsd called upsdTLS.py is provided to accept
+TLS encrypted commands from UPSmon.py and then relay that traffic to
+the local upsd. Part 2 of Configuration Examples 2.0 describes
+upsdTLS.py. The options chosen for TLS call for the latest version
+with full checking of the certificates. Use of the earlier and now
+deprecated SSL is excluded.
+
+9. UPSmon.py supports two loggers: the system log and a text based
+NUT-specific log.
+
+10. UPSmon.py does not require a supplementary program such as
+upssched or a script such as upssched-cmd. The functions of those
+programs are available in UPSmon.py. NUT’s upsmon provides three
+NOTIFYFLAG options: SYSLOG, WALL and EXEC, UPSmon.py replaces these
+with the more complete set of actions: STARTTIMER, CANCELTIMER, EMAIL,
+WALL, NOTIFY, PRINT, EPRINT, NUTLOG, SYSLOG, SETFSD, SHUTDOWN and
+DEBUG.
+
+11. Texts to be included in messages may be given names, and may
+incorporate other named messages. The upsmon NOTIFYMSG % substitution
+is extended with further substitutions.
+
+12. The low battery status LB provided by upsd is supplemented by
+three further low battery statuses LB1, LB2 and LB3 for which the trip
+levels may be set in UPSmon.conf.
+
+The Python3 scripts are :
+
+ UPSmon.py : Daemon replaces upsmon, upssched and upssched-cmd.
+
+ mkUPSmonconf.py : Utility script creates a basic configuration file
+ UPSmon.conf for standard or timed shutdown plans.
+
+UPSmon.py also requires the following scripts available in the Shims
+repository https://github.com/NUT-RogerPrice/Shims/tree/master
+
+ upsdTLS.py : Daemon receives TLS encrypted commands on port ups/401
+ and passes them in plain text to upsd's port nut/3493
+
+ mkNUTcert.py : Utility script creates a private key/public key pair,
+ and issues the corresponding "server" and "client" PEM-encoded
+ certificates suitable for the shims.
+
+Full documentation is available in Part 3 of Configuration Examples
+version 2.0.
+
+The Makefile serves to run the Python linter on the source code using
+the command make.
