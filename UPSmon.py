@@ -1,8 +1,9 @@
-#!/usr/local/bin/python3.8 -u
+#!/usr/bin/python3 -u
 # UPSmon Manage local and remote NUT installations
+# Called by systemctl start nut-py-monitor.service
 # Copyright (C) 2019-2021 Roger Price. GPL v3 or later at your choice.
 '''UPSmon Manage local and remote NUT installations'''
-Version='1.1'
+Version='1.3'
 
 # Version 1.1 changes:
 # 2020-10-26 RP Added built-in timer 'start'
@@ -12,7 +13,15 @@ Version='1.1'
 # 2020-11-11 RP Added statuses LB1, LB2 and LB3
 # 2020-11-11 RP Test for m = None in data_time
 # 2020-11-27 RP OS ID improvement
-# 2021-05-06 RP Rewrote recv_response to be protocol aware
+
+# Version 1.2 changes:
+# 2021-05-30 RP primary/secondary are permissable alternatives to master/slave
+# 2021-05-30 RP Added status LS
+# 2021-08-19 RP Debian 11 uses /usr/bin/python3 v3.9
+
+# Version 1.3 changes:
+# 2022-09-05 RP Use Debian 11 as primary examplle
+# 2022-09-06 RP Removed characters : and @ from NAME
 
 # We need some library stuff
 import argparse, ast, datetime, getpass, inspect, logging, io, os, pathlib, pwd
@@ -21,20 +30,22 @@ from threading import Timer
 #from pyasn1_modules import pem, rfc2459
 #from pyasn1.codec.der import decoder
 try :
-  import lex, yacc
+  from ply import lex, yacc
 except ImportError as err :
-  msg = ('Error 200: Unable to import lex and yacc.\n'\
+  msg = ('Error 200: Unable to import lex and yacc from ply.\n'\
          '\t Reason: {}\n'\
          '\t This program uses PLY (Python Lex-Yacc).\n'\
-         '\t Please install PLY.  It may be available to you as a package,\n'\
+         '\t Please install PLY.  It may be available to you as a package.\n'\
+         '\t Use command "python3 -m pip install ply"\n'\
          '\t or you can download it from http://www.dabeaz.com/ply/ and\n'\
          '\t then install lex.py and yacc.py with your other Python modules.')\
          .format(err.args)
   print(msg, file=sys.stderr, flush=True)
   exit(1)
-if sys.version_info[0] >= 3 and sys.version_info[1] >= 5 : pass
+if   sys.version_info[0] >= 4 : pass
+elif sys.version_info[0] == 3 and sys.version_info[1] >= 6 : pass
 else :
-  msg = ('Message 210: This program requires Python version 3.5 or later.\n'\
+  msg = ('Message 210: This program requires Python version 3.6 or later.\n'\
          '\t You are using version {}.')\
          .format(sys.version.replace('\n',' '))
   print(msg, file=sys.stderr, flush=True)
@@ -365,25 +376,31 @@ def date_time_µsec () :
   if m : return '{} {}.{}'.format(m.group(1), m.group(2), m.group(3))
   else : return '{} {}.{}'.format(None, None, None)
 
-# date_time      Local time in ISO format       2019-09-09 17:35:53
+# date_time      Local date and time in ISO format 2019-09-09 17:35:53
 def date_time () :
   m = re.match(r'([0-9-]+)[A-Z]([0-9:]+)\..*',datetime.datetime.now().isoformat())
   if m : return '{} {}'.format(m.group(1), m.group(2))
   else : return '{} {}'.format(None, None)
 
-# date           Local day in ISO format        2019-09-09
+# date           Local day in ISO format           2019-09-09
 def date () :
   m = re.match(r'([0-9-]+)[A-Z]([0-9:]+)\..*',datetime.datetime.now().isoformat())
   if m : return '{}'.format(m.group(1))
   else : return '{}'.format(None)
 
-# System time including microseconds            2019-09-09.968428
+# tod            Local time in ISO format          17:35:53
+def tod () :
+  m = re.match(r'([0-9-]+)[A-Z]([0-9:]+)\..*',datetime.datetime.now().isoformat())
+  if m : return '{}'.format(m.group(2))
+  else : return '{}'.format(None)
+
+# System time including microseconds               2019-09-09.968428
 def time_µsec () :
   m = re.match(r'([0-9-]+)[A-Z]([0-9:]+)\.([0-9][0-9][0-9]).*',datetime.datetime.now().isoformat())
   if m : return '{}.{}'.format(m.group(2), m.group(3))
   else : return '{}.{}'.format(None, None)
 
-# System time in microseconds                    968428
+# System time in microseconds                      968428
 def µsec () :
   m = re.match(r'([0-9-]+)[A-Z]([0-9:]+)\.([0-9][0-9][0-9]).*',datetime.datetime.now().isoformat())
   if m : return '{}'.format(m.group(3))
@@ -447,7 +464,7 @@ def logger (l, d=0) :
   # And now, the logging action
   if debug >= d :
     # Friendly prefix for messages to the log file
-    msg = '{} {} {}\n'.format(time_µsec(), fnl(), new_inode_flag+l)
+    msg = '{} {} {}\n'.format(tod(), fnl(), new_inode_flag+l)
     try :
       rc = log.write(msg)                 # Ensure data recorded on disk in case we use kill
       log.flush()                         # to stop the daemon.
@@ -469,7 +486,7 @@ def ylogger (l, y=0) :
       log, log_inode = open_log_file(log_file, os.getuid(), os.getgid())   # Re-opened for current user
 
     # Friendly prefix for messages to the log file
-    msg = '{} {} {}\n'.format(time_µsec(), fnl(), l)
+    msg = '{} {} {}\n'.format(tod(), fnl(), l)
     try :
       rc = log.write(msg)                 # Ensure data recorded on disk in case we use kill
       log.flush()                         # to stop the daemon.
@@ -492,13 +509,14 @@ def events_decode_dict () :
   (None,'BOOST')    :('BOOSTNone',  'BOOST'),    ('BOOST',None)    :('BOOSTNone',  None),
   (None,'BYPASS')   :('BYPASSNone', 'BYPASS'),   ('BYPASS',None)   :('BYPASSNone', None),
   (None,'CAL')      :('CALNone',    'CAL'),      ('CAL',None)      :('CALNone',    None),
-  (None,'CHRG')     :('CHRGNone',   'CHARG'),    ('CHRG',None)     :('CHRGNone',   None),
-  (None,'DISCHRG')  :('DISCHRGNone','DISCHARG'), ('DISCHRG',None)  :('DISCHRGNone',None),
+  (None,'CHRG')     :('CHRGNone',   'CHRG'),     ('CHRG',None)     :('CHRGNone',   None),
+  (None,'DISCHRG')  :('DISCHRGNone','DISCHRG'),  ('DISCHRG',None)  :('DISCHRGNone',None),
   (None,'FSD')      :('FSDNone',    'FSD'),      ('FSD',None)      :('FSDNone',    None),
   (None,'LB')       :('LBNone',     'LB'),       ('LB',None)       :('LBNone',     None),
   (None,'LB1')      :('LB1one',     'LB1'),      ('LB1',None)      :('LB1None',    None),
   (None,'LB2')      :('LB2None',    'LB2'),      ('LB2',None)      :('LB2None',    None),
   (None,'LB3')      :('LB3None',    'LB3'),      ('LB3',None)      :('LB3None',    None),
+  (None,'LS')       :('LSNone',     'LS'),       ('LS',None)       :('LSNone',     None),
   ('COMM','NOCOMM') :('COMMNOCOMM', 'NOCOMM'),   ('NOCOMM','COMM') :('COMMNOCOMM', 'COMM'),
   (None,'OFF')      :('OFFNone',    'OFF'),      ('OFF',None)      :('OFFNone',    None),
   ('OB','OL')       :('OLOB',       'OL'),       ('OL','OB')       :('OLOB',       'OB'),
@@ -651,12 +669,13 @@ def read_conf(conffile) :
   # The following tokens are placed low in the list so that keywords will be detected
   # as such and not seen as just names.
   def t_STATUS (t) :           # Created with sorted(list(dict.fromkeys([x[0] for x in D])))
-    r'None|ALARM|BOOST|BYPASS|CAL|CHRG|NOCOMM|DISCHRG|FSD|LB1|LB2|LB3|LB|COMM|OB|OFF|OL|OVER|RB|TEST|TICK|TOCK|TRIM'
+    r'None|ALARM|BOOST|BYPASS|CAL|CHRG|NOCOMM|DISCHRG|FSD|LB1|LB2|LB3|LB|LS|COMM|OB|OFF|OL|OVER|RB|TEST|TICK|TOCK|TRIM'
     if t.value == 'None' : t.value = None
     t.lineno = ln (t) ; DD_t (t) ; return t
   def t_TO (t) :               r'TO' ;               t.lineno = ln (t) ; DD_t (t) ; return t
   def t_NAME (t) :                        # Names for humans, groups, timers, UPS's, messages
-    r'(?P<a>[a-zA-Z_][a-zA-Z0-9._%+-:@]*)'
+    # r'(?P<a>[a-zA-Z_][a-zA-Z0-9._%+-:@]*)'   Removed : and @
+    r'(?P<a>[a-zA-Z_][a-zA-Z0-9._%+-]*)'
     t.lineno, t.value = help (t) ; DD_t (t) ; return t
 
   # Error handling rule
@@ -1204,7 +1223,10 @@ def read_conf(conffile) :
       powerval[fqups] = int(e (AST[2]))   # E.g. 1
       upsduser[fqups] = e (AST[3])        # As declared in upsd.conf
       password[fqups] = e (AST[4])        # idem
-      raw_mastslav = e (AST[5])           # Name should be 'master' or 'slave'
+      # Type should be 'primary' or 'secondary', previously 'master' or 'slave'
+      # but for the moment we use master and slave internally
+      try : raw_mastslav = {'primary':'master', 'secondary':'slave', 'master':'master', 'slave':'slave'}[e (AST[5])]
+      except Exception : raw_mastslav = e (AST[5])
       if raw_mastslav in ['master','slave'] :
         mastslav[fqups] = raw_mastslav
         # Initialize UPS charge dictionary addressed by UPS fully qualified name name
@@ -1216,8 +1238,12 @@ def read_conf(conffile) :
                    +tab+'e ({},...) Initialized {}[{}]={}')\
                    .format(fnl(), AST[0], D,fqups,v))
       else:
-        msg=("{}[{},{}]  Error 420: TYPE should be master or slave, not {}.\n"\
-            +tab+"I am ignoring this declaration.")\
+        mastslav[fqups] = 'master'        # Error recovery
+        charge[fqups] = -1                # Error recovery. Charge not yet known
+        battery_charge_low[fqups] = battery_charge_low_default # E.g. {1:50, 2:25, 3:12}
+        msg=('{}[{},{}]  Error 420: TYPE should be primary or secondary,\n'\
+            +tab+'master or slave are tolerated, but not {}.\n'\
+            +tab+'I am ignoring this declaration.')\
             .format(confname, AST[0][1], AST[0][2], raw_mastslav)
         logger(msg); eprinter(msg)
         read_conf_rc = 1                  # This configuration not acceptable
@@ -1550,47 +1576,50 @@ def read_conf(conffile) :
   else : return 1
 
 #############################################################################################
-# Log the current configuration if option -D
+# Log the current configuration as single text with light tabbing 
 def Dconfig_logger() :
-  Dlogger('Configuration global variables...')
-  Dlogger('   upsd_map: {} entries'.format(len(upsd_map)))
+  nl = "\n   "
+  t = 'Configuration global variables...'
+  t = t + nl + '   upsd_map: {} entries'.format(len(upsd_map))
   for u in upsd_map :
-    Dlogger('{} {} \t{}'.format(" "*6, u, upsd_map[u]))
-  Dlogger('   grs             {}'.format(grs))
-  Dlogger('   msgs: {} entries'.format(len(msgs)))
+    t = t + nl + '{} {} \t{}'.format(" "*6, u, upsd_map[u])
+  t = t + nl + '   grs             {}'.format(grs)
+  t = t + nl + '   msgs: {} entries'.format(len(msgs))
   for m in msgs :
-    Dlogger('{} {} \t{}'.format(" "*6, m, msgs[m]))
-  Dlogger('   powerval        {}'.format(powerval))
-  Dlogger('   upsduser        {}'.format(upsduser))
-  Dlogger('   upsd_sock       {}'.format(upsd_sock))
-  Dlogger('   upsd_TLS        {}'.format(upsd_TLS))
-  Dlogger('   password        {}'.format("* "*len(password)))   # One * per ups
-  Dlogger('   mastslav        {}'.format(mastslav))
-  Dlogger('   battery_charge_low: {} entries'.format(len(battery_charge_low)))
+    t = t + nl + '{} {} \t{}'.format(" "*6, m, msgs[m])
+  t = t + nl + '   powerval        {}'.format(powerval)
+  t = t + nl + '   upsduser        {}'.format(upsduser)
+  t = t + nl + '   upsd_sock       {}'.format(upsd_sock)
+  t = t + nl + '   upsd_TLS        {}'.format(upsd_TLS)
+  t = t + nl + '   password        {}'.format("* "*len(password))   # One * per ups
+  t = t + nl + '   mastslav        {}'.format(mastslav)
+  t = t + nl + '   battery_charge_low: {} entries'.format(len(battery_charge_low))
   for u in battery_charge_low :
-    Dlogger('{} {} \t{}'.format(" "*6, u, battery_charge_low[u]))
-  Dlogger('   events: event_key and corresponding actions ... {} events'.format(len(events)))
+    t = t + nl + '{} {} \t{}'.format(" "*6, u, battery_charge_low[u])
+  t = t + nl + '   events: event_key and corresponding actions ... {} events'.format(len(events))
   for key in events :
-    Dlogger('{} {}  {} actions'.format(" "*6, key, len(events[key])))
+    t = t + nl + '{} {}  {} actions'.format(" "*6, key, len(events[key]))
     for act in events[key] :
-      Dlogger('{} {}'.format(" "*12, act))
-  Dlogger('   pollfreq =      {}'.format(pollfreq))
-  Dlogger('   pollfreqalert = {}'.format(pollfreqalert))
-  Dlogger('   certfile: {} entries'.format(len(certfile)))
+      t = t + nl + '{} {}'.format(" "*12, act)
+  t = t + nl + '   pollfreq =      {}'.format(pollfreq)
+  t = t + nl + '   pollfreqalert = {}'.format(pollfreqalert)
+  t = t + nl + '   certfile: {} entries'.format(len(certfile))
   for c in certfile :
-    Dlogger('{} {} \t{}'.format(" "*6, c, certfile[c]))
-  Dlogger('   minsupplies =   {}'.format(minsupplies))
-  Dlogger('   group_host =    {}'.format(group_host))
-  Dlogger('   group_port =    {}'.format(group_port))
-  Dlogger('   SMTP_Server =   {}'.format(SMTP_Server))
-  Dlogger('   SMTP_Port =     {}'.format(SMTP_Port))
-  Dlogger('   SMTP_User =     {}'.format(SMTP_User))
+    t = t + nl + '{} {} \t{}'.format(" "*6, c, certfile[c])
+  t = t + nl + '   minsupplies =   {}'.format(minsupplies)
+  t = t + nl + '   group_fqups =   {}'.format(group_fqups)
+  t = t + nl + '   group_host =    {}'.format(group_host)
+  t = t + nl + '   group_port =    {}'.format(group_port)
+  t = t + nl + '   SMTP_Server =   {}'.format(SMTP_Server)
+  t = t + nl + '   SMTP_Port =     {}'.format(SMTP_Port)
+  t = t + nl + '   SMTP_User =     {}'.format(SMTP_User)
   if isinstance(SMTP_Pass, str) : msg = "*"*len(SMTP_Pass)
   else :                      msg = "None"
-  Dlogger('   SMTP_Pass =     {}'.format(msg))
-  Dlogger('   shell =         {}'.format(shell))
-  Dlogger('   conf_mtime =    {}'.format(conf_mtime))
-  Dlogger('...end of configuration global variables:')
+  t = t + nl + '   SMTP_Pass =     {}'.format(msg)
+  t = t + nl + '   shell =         {}'.format(shell)
+  t = t + nl + '   conf_mtime =    {}'.format(conf_mtime)
+  t = t + nl + '...end of configuration global variables:'
+  Dlogger(t)
   return 0
 
 #############################################################################################
@@ -1610,6 +1639,7 @@ def Dstate_logger() :
   Dlogger('   LB1None =       {}'.format(LB1None))
   Dlogger('   LB2None =       {}'.format(LB2None))
   Dlogger('   LB3None =       {}'.format(LB3None))
+  Dlogger('   LSNone =        {}'.format(LSNone))
   Dlogger('   COMMNOCOMM =    {}'.format(COMMNOCOMM))
   Dlogger('   OFFNone =       {}'.format(OFFNone))
   Dlogger('   OLOB =          {}'.format(OLOB))
@@ -2081,7 +2111,7 @@ def notifier_bak (message) :
       m = re.match('\((:.*)\)',display) # pylint: disable=anomalous-backslash-in-string
       if m :
         display = m.group(1)
-        banner = '{} {}@{}'.format(date_time(), getpass.getuser(), hostname)
+        banner = '{}@{}'.format(getpass.getuser(), hostname)
         command = 'sudo -u {} DISPLAY="{}" {} {} "[{}] {}"'\
                   .format(user_name, display, notify_send, options, banner, message)
         Dlogger('notifier: issuing command {}'.format(command))
@@ -2140,16 +2170,16 @@ def set_FSD (fqups_tuple) :
       rc, reply = send_cmd('FSD {}'.format(ups_name), ups_domain, ups_port, upsdtimeout)
       m = re.match(r'.*OK.*',reply)
       if not m :
-        msg=("{} Error 730: set_FSD({}) error: \"FSD {}\" request refused for user {}.\n"\
-            +tab+"Continuing ...")\
-            .format(blob, pp_ups(fqups), ups_name, upsduser[fqups])
+        msg=('{} Error 730: set_FSD({}) error: \"FSD {}\" request refused for user {}.\n'\
+             +tab+'Continuing ...')\
+             .format(blob, pp_ups(fqups), ups_name, upsduser[fqups])
         logger(msg); eprinter(msg)
         return 1
-
     else :                                # No FSD to be sent to master
-      msg=("{} Error 740: set_FSD error: FSD should be signalled to slaves, not master {}.\n"\
-          +tab+"Continuing ...")\
-          .format(blob, pp_ups(fqups))
+      msg=('{} Error 740: set_FSD error: FSD should be signalled to secondaries (slaves),\n'\
+           +tab+'not the primary (master) {}.\n'\
+           +tab+'Continuing ...')\
+           .format(blob, pp_ups(fqups))
       logger(msg); eprinter(msg)
       return 1
 
@@ -2329,25 +2359,24 @@ def get_battery_charge (fqups) :
 # A tuple such as ('HB-timer', 20) e.g. part of (cond,'STARTTIMER', ("HB-timer", 20))
 # A tuple such as ('bla', 'bla', 'bla', 'bla')  e.g. part of (cond, 'email', ('bla', 'bla', 'bla', 'bla'))
 def do_action(fqups, event) :
-  Dlogger('do_action 1 fqups = {}, event = {}'.format(pp_ups(fqups), event))
-
   # Get this UPS unit's current charge from upsd's battery.charge
   charge[fqups] = get_battery_charge(fqups)
-  DDlogger('GET VAR {} battery.charge: setting charge = {}'.format(ups_name,charge[fqups]))
   ch = charge[fqups]                       # Charge of this ups
+  Dlogger ('ddd do_action 1 fqups={}, event={}, charge={}'.format(pp_ups(fqups), event, ch))
 
+  # See https://realpython.com/python-string-formatting/ for the four styles of string formatting
+  # The string.format style is #2:
   pp_event='{}->{}'.format(event[0],event[1])
-  banner = '{} {}@{}'.format(date_time(), getpass.getuser(), hostname)
-  adornment = {'u':pp_ups(fqups), 'c':ch, 'e':pp_event, 'b':banner, 'h':hostname}
+  banner = '{}@{}'.format(getpass.getuser(), hostname)
+  # The formatting style is #1 with variable substitutions by name.  Here is the RHS:
+  named_values = {'u':pp_ups(fqups), 'c':ch, 'e':pp_event, 'b':banner, 'h':hostname}
   # Get list of actions
   events_index = fqups+str(event).replace(' ','')     # Events index is a string with no spaces
-  Dlogger('pp_event = {}  events_index = {}'.format(pp_event, events_index))
   try : action_list = events[events_index]
   except KeyError : action_list = []
-  DDlogger('do_action 2 action_list = {}'\
-           .format(action_list))
+  Dlogger ('ddd do_action 2 action_list = {}'.format(action_list))
   for condition, action_keyword, action_text in action_list :
-    Dlogger(('do_action 3 {}{}: condition = {}, action_keyword = {},\n'\
+    Dlogger(('ddd do_action 3 {}{}: condition = {}, action_keyword = {},\n'\
              +tab+'action_text = {}   type(action_text) =  {}')\
             .format(pp_ups(fqups), event, condition, action_keyword,
                     action_text, type(action_text)))
@@ -2358,7 +2387,7 @@ def do_action(fqups, event) :
       D = events_decode_dict()[event][0]              # E.g. BOOSTNone dicionary
       target = condition[1]                           # E.g. 'OL'
       if globals()[D][fqups] != target :
-        DDlogger('do_action 4 condition D={}, event={} target={}: False, ignoring this action'\
+        Dlogger('ddd do_action 4 condition D={}, event={} target={}: False, ignoring this action'\
                .format(D,event,target))
         continue
 
@@ -2378,28 +2407,29 @@ def do_action(fqups, event) :
 #    if type(action_text) == int :
 #      DDlogger('do_action 4 {}{}: type(action_text)={}'\
 #               .format(pp_ups(fqups), event, type(action_text)))
-#      action_text_adorn = action_text
+#      action_text_with_values = action_text
 
     # Separate the simple text actions and the complex tuples
     # First the simple strings ...
     if isinstance(action_text, str) :
-      DDlogger(('do_action 5 {}{}: attempting action_text % adornment ...\n'
+      Dlogger(('ddd do_action 5 {}{}: attempting action_text % named_values ...\n'
                 +tab+'{} % {}')\
-                .format(pp_ups(fqups), event, action_text, adornment))
+                .format(pp_ups(fqups), event, action_text, named_values))
       # Expand action_text to include arguments fqups, charge, event and banner
       # Typical usage is 'Hello UPS %(ups)s' % {'ups':fqups, 'ch':charge, 'ev':event}
       # to produce 'Hello UPS cheapo'
-      action_text_adorn = action_text % adornment
+      action_text_with_values = action_text % named_values
 
-      DDlogger('do_action 6 {}{}: action_keyword = {}, action_text_adorn = {}'\
-                   .format(pp_ups(fqups), event, action_keyword, action_text_adorn))
-      try : f(action_text_adorn)
+      # The action, e.g. start_timer, do_shutdown, is put to work, 
+      Dlogger('ddd do_action 6 {}{}: action_keyword = {}, action_text_with_values = {}'\
+              .format(pp_ups(fqups), event, action_keyword, action_text_with_values))
+      try : f(action_text_with_values)
       except Exception as ex :   # This does not catch problems in the called function
         msg=('{} Error 840: do_action error when attempting to execute\n'\
              +tab+'{}({})\n'\
              +tab+'Reason: {}\n'\
              +tab+'Continuing ...')\
-             .format(blob, f, action_text_adorn, ex)
+             .format(blob, f, action_text_with_values, ex)
         logger(msg); eprinter(msg)
         return 1
       continue
@@ -2407,28 +2437,28 @@ def do_action(fqups, event) :
     # Separate the simple text actions and the complex tuples
     # ... and now the tuples
     if isinstance(action_text, tuple) :
-      DDlogger('do_action 10 {}{}: type(action_text)={} len(action_text)={}'\
-               .format(pp_ups(fqups), event, type(action_text), len(action_text)))
+      Dlogger('ddd do_action 10 {}{}: type(action_text)={} len(action_text)={}'\
+              .format(pp_ups(fqups), event, type(action_text), len(action_text)))
       # Start timer is an irregular case with no % substitutions
-      if action_keyword == 'start_timer' :  action_text_adorn = action_text
+      if action_keyword == 'start_timer' :  action_text_with_values = action_text
       else :
         # Expand action_text to include arguments fqups, charge, event and banner
         # ('my_timer',3) => ('my_timer' % {'ups':fqups, 'ch':charge, 'ev':event}, 3)
         # ('From...', 'To...', 'Subj...', 'content')
-        action_text_adorn = ()              # Build up tuple
+        action_text_with_values = ()              # Build up tuple
         for a in action_text :
-          action_text_adorn = action_text_adorn + (a % adornment,)
+          action_text_with_values = action_text_with_values + (a % named_values,)
 
-      DDlogger('do_action 7 {}{}: action_keyword = {}, action_text_adorn = {}'\
-                   .format(pp_ups(fqups), event, action_keyword, action_text_adorn))
+      Dlogger('ddd do_action 7 {}{}: action_keyword = {}, action_text_with_values = {}'\
+              .format(pp_ups(fqups), event, action_keyword, action_text_with_values))
       # Execute the action  e.g. email(From, To, Subject,content)
-      try : f(action_text_adorn)
+      try : f(action_text_with_values)
       except Exception as ex :   # This does not catch problems in the called function
         msg=('{} Error 850: do_action error when attempting to execute\n'\
              +tab+'{}({})\n'\
              +tab+'Reason: {}\n'\
              +tab+'Continuing ...')\
-             .format(blob, f, action_text_adorn, ex)
+             .format(blob, f, action_text_with_values, ex)
         logger(msg); eprinter(msg)
         return 1
       continue
@@ -2500,7 +2530,7 @@ def cleanup_logger(line) :
   # Does the log file exist?
   try :
     # Log file exists, we do logger's job
-    rc = log.write('{} {} {}\n'.format(time_µsec(),fnl(),line))
+    rc = log.write('{} {} {}\n'.format(tod(),fnl(),line))
     log.flush()                           # Get output into file
   except Exception :
     # No logging available, print to stderr
@@ -2553,7 +2583,8 @@ powerval = {}           # How many systems protected by each UPS
                         # Also used as a list of UPS units.
 upsduser = {}           # User name as declared in upsd.users
 password = {}           # User's password as declared in upsd.users
-mastslav = {}           # Master or slave as declared in upsd.users
+# For the moment 'primary' and 'secondary' are permissable alternatives for 'master'and 'slave'
+mastslav = {}           # Primary/secondary, master/slave as declared in upsd.users
 certfile = {}           # Python TLS requires explicit file for public key. Dict indexed by group name.
 events = {}             # Event dictionary keyed by string <ups>(<event_l>,<event_r>),
                         # with corresponding values = list [(cond,KEYWORD,text), ...]
@@ -2573,9 +2604,10 @@ pollfreqalert = 5       # Same as upsmon
 #powerdownflag = '/etc/killpower2'  # Same as upsmon
 #rbwarntime = 43200      # Same as upsmon
 #nocommtime = 300        # Same as upsmon
-minsupplies = {}        # Directory addressed by group e.g. {'LOCAL': 1}
-group_host = {}         # Directory addressed by group e.g. {'LOCAL': 'localhost'}
-group_port = {}         # Directory addressed by group e.g. {'LOCAL': 3493}
+minsupplies = {}        # Dictionary addressed by group e.g. {'LOCAL': 1}
+group_host = {}         # Dictionary addressed by group e.g. {'LOCAL': 'localhost'}
+group_port = {}         # Dictionary addressed by group e.g. {'LOCAL': 3493}
+group_fqups = {}        # Dictionary addressed by group {..., group:[fqups1, ...], ...}
 
 SMTP_Server = None      # E.g. mail.example.com
 SMTP_Port = None        # E.g. 587 Assumes TLS required
@@ -2687,19 +2719,35 @@ argparser = argparse.ArgumentParser(
   epilog='License: GPL v3 or later at your choice.\n'
          'Support: nut-user mailing list.\n'
          'Documentation: http://rogerprice.org/NUT/ConfigExamples.A5.pdf')
-argparser.add_argument('-c', '--config',     nargs=1, type=arg_file_r,
+argparser.add_argument('--command',          nargs=1, choices=['fsd','reload','stop'],
+                       help='Send command to UPSmon process and exit.'\
+                            '  Valid commands are %(choices)s.',
+                       metavar='fsd|reload|stop')
+argparser.add_argument('--config', '-c',     nargs=1, type=arg_file_r,
                        default=etc_dir+'UPSmon.conf',
                        help='Configuration file, default %(default)s',
                        metavar='<file>')
-argparser.add_argument('-l', '--logfile',    nargs=1, type=arg_file_a,
+argparser.add_argument('--debug', '-D',            action='count', default=0,
+                       help='Increase the debugging level, may be repeated.')
+argparser.add_argument('--debugYacc', '-Y',        action='count', default=0,
+                       help='Increase the Lex Yacc debugging level, may be repeated.')
+argparser.add_argument('--logfile', '-l',    nargs=1, type=arg_file_a,
                        default='/var/log/NUT.log',
                        help='Log file, default %(default)s',
                        metavar='<file>')
-argparser.add_argument('--PIDFile',          nargs=1, type=str,
-                       default='/var/run/UPSmon.pid',
+argparser.add_argument('--notify', '-n',     nargs=1, type=arg_file_e,
+                       default='/usr/bin/notify-send -t 0 -u critical',
+                       help='Notify executable, default %(default)s',
+                       metavar='<executable>')
+argparser.add_argument('--PIDfile',          nargs=1, type=str,
+                       default='/run/nut/UPSmon.pid',
                        help='Pid file used by systemd, default %(default)s'\
                             ' Do not change this unless you know what you are doing.',
                        metavar='<file>')
+argparser.add_argument('--shell',            nargs=1, type=str,
+                       default='/bin/bash -c',
+                       help='Which shell will process the action commands? Default = %(default)s',
+                       metavar='<executable>')
 argparser.add_argument('--sudo',             nargs=1, type=arg_file_e,
                        default='/usr/bin/sudo',
                        help='sudo executable, default %(default)s .'
@@ -2709,42 +2757,26 @@ argparser.add_argument('--sudo',             nargs=1, type=arg_file_e,
                        ' To update /etc/sudoers use visudo , for example'
                        ' VISUAL=/usr/bin/emacs visudo -f /etc/sudoers',
                        metavar='<executable>')
-argparser.add_argument('-n', '--notify',     nargs=1, type=arg_file_e,
-                       default='/usr/bin/notify-send -t 0 -u critical',
-                       help='Notify executable, default %(default)s',
-                       metavar='<executable>')
-argparser.add_argument('-w', '--wall',       nargs=1, type=arg_file_e,
-                       # Option -n avoids 'wall: cannot get tty name: Inappropriate ioctl for device'
-                       default='/usr/bin/wall -n',
-                       help='wall executable, default %(default)s',
-                       metavar='<executable>')
-argparser.add_argument('-u', '--user',       nargs=1, type=arg_user,
-                       default=default_user,
-                       help='After launch as root, run as this user, default is %(default)s',
-                       metavar='<user>')
+argparser.add_argument('--testSHUTDOWNflag', '-K', action='count', default=0,
+                       help='Test the SHUTDOWN flag.  Not implemented.')
 argparser.add_argument('--upsdtimeout',      nargs=1, type=float,
                        default=5.0,
                        help='Socket timeout for exchanges with upsd, default is %(default)s secs',
                        metavar='<float>')
-argparser.add_argument('--shell',            nargs=1, type=str,
-                       default='/bin/bash -c',
-                       help='Which shell will process the action commands? Default = %(default)s',
-                       metavar='<executable>')
-argparser.add_argument('-D', '--debug',            action='count', default=0,
-                       help='Increase the debugging level, may be repeated.')
-argparser.add_argument('-Y', '--debugYacc',        action='count', default=0,
-                       help='Increase the Lex Yacc debugging level, may be repeated.')
-argparser.add_argument('-v', '--version',          action='version',
+argparser.add_argument('--user', '-u',       nargs=1, type=arg_user,
+                       default=default_user,
+                       help='After launch as root, run as this user, default is %(default)s',
+                       metavar='<user>')
+argparser.add_argument('--version', '-v',          action='version',
                        help='Show program, Python and SSL/TLS versions, then exit.',
                        version='%(prog)s {}, with SSL/TLS support: {}, '\
                                'running on Python {}'
                        .format(Version,ssl.OPENSSL_VERSION,sys.version.replace('\n',' ')))
-argparser.add_argument('-K', '--testSHUTDOWNflag', action='count', default=0,
-                       help='Test the SHUTDOWN flag.  Not implemented.')
-argparser.add_argument('--command',          nargs=1, choices=['fsd','reload','stop'],
-                       help='Send command to UPSmon process and exit.'\
-                            '  Valid commands are %(choices)s.',
-                       metavar='fsd|reload|stop')
+argparser.add_argument('--wall', '-w',       nargs=1, type=arg_file_e,
+                       # Option -n avoids 'wall: cannot get tty name: Inappropriate ioctl for device'
+                       default='/usr/bin/wall -n',
+                       help='wall executable, default %(default)s',
+                       metavar='<executable>')
 args = argparser.parse_args()
 debug = args.debug
 debugYacc = args.debugYacc
@@ -2764,7 +2796,7 @@ elif args.command[0] == 'stop' :   user_command = 'stop'  ; SIG_called['TERM'] =
 conffile    = args.config[0]      if isinstance(args.config, list)  else args.config
 shell       = args.shell[0]       if isinstance(args.shell, list)   else args.shell
 log_file    = args.logfile[0]     if isinstance(args.logfile, list) else args.logfile # Change variable name -> log_file
-PIDFile     = args.PIDFile[0]     if isinstance(args.PIDFile, list) else args.PIDFile
+PIDfile     = args.PIDfile[0]     if isinstance(args.PIDfile, list) else args.PIDfile
 notify_send = args.notify[0]      if isinstance(args.notify, list)  else args.notify
 try_user    = args.user[0]        if isinstance(args.user, list)    else args.user
 wall        = args.wall[0]        if isinstance(args.wall, list)    else args.wall
@@ -2774,7 +2806,7 @@ upsdtimeout = args.upsdtimeout[0] if isinstance(args.upsdtimeout, list) else arg
 #############################################################################################
 # UPS status dictionaries addressed by UPS fully qualified name
 # known_statuses = [ 'ALARM', 'BOOST', 'BYPASS', 'CAL', 'CHRG', 'DISCHRG', 'FSD',
-#                    'LB', 'LB1', 'LB2', 'LB3', 'OB', 'OFF', 'OL',
+#                    'LB', 'LB1', 'LB2', 'LB3', 'LS', 'OB', 'OFF', 'OL',
 #                    'OVER', 'RB', 'TRIM']  # Per drivers/dummy-ups.h and others
 status = {}             # Current status reported by UPSD, before any status change, e.g. OB LB FSD
 ALARMNone = {}          # Current ALARM status of each UPS, before any status change
@@ -2788,6 +2820,7 @@ LBNone = {}             # Current LB status of each UPS, before any status chang
 LB1None = {}            # Current LB1 status of each UPS, before any status change
 LB2None = {}            # Current LB2 status of each UPS, before any status change
 LB3None = {}            # Current LB3 status of each UPS, before any status change
+LSNone = {}             # Current LS status of each UPS, before any status change
 COMMNOCOMM = {}         # Current COMM/NOCOMM flipflop of each UPS, before any status change
 OFFNone = {}            # Current OFF status of each UPS, before any status change
 OLOB = {}               # Current OL/OB flipflop of each UPS, before any status change
@@ -2803,7 +2836,7 @@ raw_status_COMMNOCOMM = {} # Initialize directory {..., fqups:COMM|NOCOMM, ...}
 
 # The values used by the dictionaries
 dict_values = ['ALARM', 'BOOST', 'BYPASS', 'CAL', 'CHRG', 'DISCHRG', 'FSD',
-               'LB', 'LB1', 'LB2', 'LB3', 'OFF',
+               'LB', 'LB1', 'LB2', 'LB3', 'LS', 'OFF',
                'OB', 'OL', 'OVER', 'RB', 'TRIM', 'COMM', 'NOCOMM', None]
 known_action_keywords = sorted([k for k in action_keyword_dict()] + ['IF', '=='])
 re_action_keywords = "("      # Will become (NUTLOG|...|SYSLOG)
@@ -2812,6 +2845,9 @@ for k in known_action_keywords :
 re_action_keywords = re_action_keywords.strip("|") + ")"
 # Include common errors
 re_action_keywords_err = re_action_keywords.strip(")") + "|SHUTDOWNCMD)"
+
+# The days go by
+today = ""
 
 # Useful regular expressions
 re_fqups = r'([^:]+):([^@]+)@([^:]+):(.*)'    # Extract gr, name, domain and port (with possible event)
@@ -2823,8 +2859,9 @@ re_timer_name = r'[a-zA-Z0-9_\-.]+'           # Matches valid timer name
 calling_user = pwd.getpwnam(getpass.getuser())[0:4]     # E.g. ('jschmo', 'x', 2078, 3000)
 log, log_inode = open_log_file(log_file, calling_user[2], calling_user[3])   # Opened for calling user
 # Indent for continuation lines
-tab = ' '*len('{} '.format(time_µsec()))
+tab = ' '*11                               # Somewhat arbitrary
 # Kick off new session in the log file
+logger('#' * 53 + '')
 logger('#' * 53 + '')
 msg = '{} Version {}, Python version {}'\
       .format(prog_name, Version, sys.version.replace('\n',' '))
@@ -2940,12 +2977,22 @@ rc = build_upsd_map ()                    # Construct directory upsd_map
 if rc == 0 : pass
 else : cleanup(); exit(1)                 # build_upsd_map error
 
+# To speed up the detection of status LS, build a dictionary of fqups in each group
+# Dictionary group_fqups = {..., group:[fqups1, ...], ...}
+for fqups in powerval :
+  ups_group, ups_name, ups_domain, ups_port = fqups_explode(fqups)
+  try : ups_list = group_fqups[ups_group]
+  except Exception : ups_list = []
+  ups_list.append(fqups)                  # Python wierdness
+  group_fqups[ups_group] = ups_list
+
 # Display configuration and current state
 logger(('{} Message 930: Configuration successfully updated.\n'\
        +tab+'Use option -Y to see details of Lex and Yacc activity.')\
        .format(blob))
-Dconfig_logger()                     # Log config globals if -D called
-Dstate_logger()                      # Log state globals if -D called
+
+Dconfig_logger()                          # Debugging, log the configuration
+Dstate_logger()                           # Log state globals if -D called
 
 # Sanity checks for the configuration
 logger('Sanity checks for this configuration ...')
@@ -3032,10 +3079,8 @@ for fqups in powerval :
 #         Did the user blow off a foot as predicted by 2.7.4 upsmon.c 1812 ?
 for g in grs :
   total_pv = 0
-  for fqups in powerval :
-    m = re.match(re_fqups,fqups)          # Extract group from group:name@domain:port
-    if m.group(1) == g :
-      total_pv += int(powerval[fqups])
+  for u in group_fqups[g] :               # Each fqups in the group
+    total_pv += int(powerval[u])
   if total_pv < int(minsupplies[g]) :
     msg = ("{} Fatal error 990: Power value error in group {}.\n"\
           +tab+"Total power value {} is less than required MINSUPPLIES {}.\n"\
@@ -3128,8 +3173,8 @@ for (ups_domain, ups_port) in upsd_map:
     # PROTOCOL_TSLv1_1 is "wrong version". PROTOCOL_SSLv3 is "wrong version number".
     # Testing with ssl.OPENSSL_VERSION = OpenSSL 1.1.1d  10 Sep 2019
     protocol_number = ssl.PROTOCOL_TLS_CLIENT  # Use highest possible, requires Python 3.6
-    logger('{} Message 1130: ssl.OPENSSL_VERSION = {}'\
-           .format(blob, ssl.OPENSSL_VERSION))
+    logger('{} Message 1130: Will use {} ssl.PROTOCOL_TLS_CLIENT = {}'\
+           .format(blob, ssl.OPENSSL_VERSION, protocol_number))
 
     # Get name of protocol from number
     try :              protocol_name = protocol_names[protocol_number]
@@ -3175,7 +3220,7 @@ for (ups_domain, ups_port) in upsd_map:
     s.settimeout(None)           # https://github.com/pyca/pyopenssl/issues/168
     try : ss = client_context.wrap_socket(s, server_side=False, server_hostname=ups_domain)
     except ssl.SSLError as ex :
-      msg=('{} Error 1160: Unable to install TLS wrapper version {} on socket {}.\n'\
+      msg=('{} Error 1160: Unable to install TLS certificate version {} on socket {}.\n'\
            +tab+'Reason: {}\n'\
            +tab+'Exiting ...\n'\
            '{}')\
@@ -3183,7 +3228,7 @@ for (ups_domain, ups_port) in upsd_map:
       logger(msg); eprinter(msg)
       cleanup(); exit(1)
     except Exception as ex :
-      msg=('{} Error 1165: Unable to install TLS wrapper version {} on socket {}\n'\
+      msg=('{} Error 1165: Unable to install TLS certificate version {} on socket {}\n'\
            +tab+'Reason: {}\n'\
            +tab+'Exiting ...\n'\
            '{}')\
@@ -3213,6 +3258,8 @@ for (ups_domain, ups_port) in upsd_map:
             .format(ups_domain, ups_port, pp_sock(ss)))
 
   # 2d. Log in to upsd, expect OK
+  # The nut protocol identifies a user by the data given in file upsd.users :
+  # each user is identified by name and password.
   rc, reply = send_cmd('USERNAME ' + upsduser[fqups], ups_domain, ups_port, upsdtimeout)
   m = re.match(r'\s*OK.*',reply)
   if m :
@@ -3242,14 +3289,15 @@ count_not_TLS = len(upsd_TLS) - count_TLS
 logger ('... {} socket(s) opened. TLS protected: {}, not protected: {}'\
         .format(len(upsd_TLS), count_TLS, count_not_TLS))
 
-# 2e. Log into UPS units
-# The nut protocol identifies a user by the data given in file upsd.users :
-# each user is identified by name and password.  Since several UPS units may
-# share the same administrator, logging in for each UPS ensures that everyone
-# needed for UPSmon is logged in, but may well generate "already logged in"
-# warnings.
+# 2e. Attach the UPS units
+# upsd keps a count the secondaries protected by a given UPS. 
+# We now add our UPS units to this count.
+# Note that since primaries are also counted, the count is 1 + number of secondaries.
 for fqups in powerval :
-  Dlogger('2e. Logging into UPS {} ...'.format(pp_ups(fqups)))
+  if powerval[fqups] == 0 :
+    Dlogger('2e. Not counting {} since powerval = 0'.format(pp_ups(fqups)))
+    continue
+  Dlogger('2e. Counting {} fed by UPS {} ...'.format(mastslav[fqups], pp_ups(fqups)))
   m = re.match(re_fqups,fqups)
   if not m :
     msg=('{} Error 1190: Internal error: Unable to decode fqups {}.\n'\
@@ -3264,7 +3312,7 @@ for fqups in powerval :
     m_ok = re.match(r'\s*OK.*',reply)
     m_ali = re.match(r'\s*ERR\s*ALREADY-LOGGED-IN.*',reply)
     if m_ok :
-      Dlogger('... logged into UPS {}'.format(pp_ups(fqups)))
+      Dlogger('... counted {} fed by UPS {}'.format(mastslav[fqups], pp_ups(fqups)))
     elif m_ali :                          # Two UPS units share an administrator.
       msg=('{} Warning 1200: LOGIN {} for UPS {}\n'\
            +tab+'upsd replied: {}   Continuing ...')\
@@ -3284,19 +3332,25 @@ for fqups in powerval :
     logger(msg); eprinter(msg)
     cleanup(); exit(1)
 
-  # If required, claim to be master
+  # If required, claim to be primary, falling back on master
   if mastslav[fqups] == 'master' :
-    Dlogger('2e. Claiming to be the master of UPS {} ...'.format(pp_ups(fqups)))
-    rc, reply = send_cmd('MASTER ' + ups_name, ups_domain, ups_port, upsdtimeout)
+    Dlogger('2e. Claiming to be the primary of UPS {} ...'.format(pp_ups(fqups)))
+    rc, reply = send_cmd('PRIMARY ' + ups_name, ups_domain, ups_port, upsdtimeout)
     m = re.match(r'\s*OK.*',reply)
     if m :
-      Dlogger('... claimed mastery of UPS {}'.format(pp_ups(fqups)))
+      Dlogger('... claimed to be primary of UPS {}'.format(pp_ups(fqups)))
     else :
-      msg=('{} Error 1230: MASTER request refused for {}.\n'\
-           +tab+'Exiting ...')\
-           .format(blob, pp_ups(fqups))
-      logger(msg); eprinter(msg)
-      cleanup(); exit(1)
+      Dlogger('2e. Claiming to be the master of UPS {} ...'.format(pp_ups(fqups)))
+      rc, reply = send_cmd('MASTER ' + ups_name, ups_domain, ups_port, upsdtimeout)
+      m = re.match(r'\s*OK.*',reply)
+      if m :
+        Dlogger('... claimed mastery of UPS {}'.format(pp_ups(fqups)))
+      else :
+        msg=('{} Error 1230: PRIMARY and MASTER requests refused for {}.\n'\
+             +tab+'Exiting ...')\
+             .format(blob, pp_ups(fqups))
+        logger(msg); eprinter(msg)
+        cleanup(); exit(1)
 # End of for fqups in powerval :
 # End of 2e. log into UPS units
 
@@ -3325,16 +3379,16 @@ if fork :
   if child_pid > 0 :                         # Parent process receives child's PID
     # Write child's PID to file for systemd to enjoy.
     logger('{} Message 1004: Writing child PID {} to file {}'\
-           .format(blob, child_pid, PIDFile))
+           .format(blob, child_pid, PIDfile))
     try :
-      with open(PIDFile, 'wt') as PID_fd :
+      with open(PIDfile, 'wt') as PID_fd :
         PID_fd.write('{}'.format(child_pid))   # write likes strings, not integers
         PID_fd.close()
     except Exception as ex :
       msg=('{} Error 1005: Unable to create PID file {}\n'\
            +tab+'Reason: {}\n'
            +tab+'Exiting ...')\
-           .format(blob, PIDFile, ex)
+           .format(blob, PIDfile, ex)
       logger(msg); eprinter(msg)
       cleanup() ; exit (1)
     msg = ('{} Message 1010: Parent says: child {} forked ...\n'\
@@ -3418,9 +3472,13 @@ start_timer(('start', 1))                 # TIMEOUT start when UPSmon.py starts
 while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
   poll_number += 1
   time_at_loop_start = time.time()
-  line = '{} {} {} {}'.format('#'*34, 'loop_forever', poll_number, '#'*34)
-  if debug > 1 : print(line)
-  Dlogger(line)
+  newday = datetime.date.today().isoformat()
+  if newday == today : pass
+  else :
+    today = newday
+    line = '{} {} {} {} {}'.format(today, '#'*34, 'loop_forever', poll_number, '#'*34)
+    logger(line)
+  Dlogger ('ddd {} {}'.format(poll_number, '#'*34))
   # Attempt to reload configuration if SIGHUP or newer configuration file available
   if SIG_called['HUP'] :
     msg = 'SIGHUP called.  For the moment, no configuration file reload.'
@@ -3441,12 +3499,15 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
 
     # Get this UPS unit's new status list from upsd's ups.status
     rc, reply = send_cmd('GET VAR {} ups.status'.format(ups_name), ups_domain, ups_port, upsdtimeout)
-    Dlogger('GET VAR {} ups.status: rc=«{}»   reply=«{}»'.format(ups_name, rc, reply))
+    Dlogger('ddd {} GET VAR {} ups.status: rc=«{}»   reply=«{}»'.format(poll_number, ups_name, rc, reply))
+    # Typically reply=«VAR Eaton ups.status "OL"»
     if reply != 'NOCOMM' :            # upsd is COMM for this fqups
       # Merge the raw statuses read from upsd and the timeouts
+      Dlogger('ddd {} raw_status_list_TO = {}'.format(poll_number, raw_status_list_TO))
       raw_status_list = re.split('[\s\"]',reply) + raw_status_list_TO # pylint: disable=anomalous-backslash-in-string
-      DDlogger('GET VAR {} raw_status_list = {}'.format(ups_name, raw_status_list))
+      Dlogger('ddd {} raw_status_list = {}'.format(poll_number, raw_status_list))
       new_status_list=[st for st in raw_status_list[4:] if not st == '']
+      Dlogger('ddd {} new_status_list = {}'.format(poll_number, new_status_list))
     else :                          # upsd is NOCOMM for this fqups
       new_status_list = raw_status_list_TO
     # Transfer of status changes from raw_status_COMMNOCOMM to raw_status_list
@@ -3457,14 +3518,30 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
     status = {1:'LB1', 2:'LB2', 3:'LB3'}
     for i in battery_charge_low[fqups] :
       if charge[fqups] <= battery_charge_low[fqups][i] : new_status_list.append(status[i])
-    Dlogger('new_status_list = {}  active_timers = {}'\
-            .format(new_status_list, pp_active_timers(active_timers)))
+    Dlogger('ddd {} new_status_list = {}  active_timers = {}'\
+            .format(poll_number, new_status_list, pp_active_timers(active_timers)))
+
+    # Look for minsupplies not satisfied events
+    # In the group to which this UPS belongs, do we have enough "powervalues" to cover the minsupplies ?
+    # Did the user blow off a foot as predicted by 2.7.4 upsmon.c 1812 ?
+    # During the first polling loop, OLOB is not yet initialised
+    if poll_number < 2 : pass
+    else :
+      current_power = 0
+      for u in group_fqups[ups_group] :     # All the UPS units in this group
+        if OLOB[u] == 'OB' : pass
+        else : current_power += int(powerval[u])
+      if current_power < int(minsupplies[ups_group]) :
+        new_status_list.append('LS')        # Append LS status
+        Dlogger(('Not enough power supplies in group {}.  Required {}, available {}.\n'\
+                 +tab+'UPS {} now in state LS. new_status_list = {}')
+                 .format(ups_group, minsupplies[ups_group], current_power, pp_ups(u), new_status_list))
 
     # Do we have an event for this UPS, i.e. a status change ?
     for new_status in new_status_list :
       # Try each possible upsd status in turn.   Extract timer name from 'TO(name)'
       mTO = re.match('TO\(([^\)]+)\)',new_status) # pylint: disable=anomalous-backslash-in-string
-      Dlogger('new_status = {}   mTO={}'.format(new_status, mTO))
+      Dlogger('ddd {} new_status = {}   mTO={} timer name?'.format(poll_number, new_status, mTO))
       if   safe_get('ALARMNone',fqups) == new_status : continue          # No status change
       elif safe_get('BOOSTNone',fqups) == new_status : continue          # No status change
       elif safe_get('BYPASSNone',fqups) == new_status : continue         # No status change
@@ -3476,6 +3553,7 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
       elif safe_get('LB1None',fqups) == new_status : continue            # No status change
       elif safe_get('LB2None',fqups) == new_status : continue            # No status change
       elif safe_get('LB3None',fqups) == new_status : continue            # No status change
+      elif safe_get('LSNone',fqups) == new_status : continue             # No status change
       elif safe_get('COMMNOCOMM',fqups,'COMM') == new_status : continue  # No status change
       elif safe_get('OFFNone',fqups) == new_status : continue            # No status change
       elif safe_get('OLOB',fqups,'OL') == new_status : continue          # No status change
@@ -3507,10 +3585,12 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
         event = (None,'LB2');         LB2None[fqups] = 'LB2';         do_action (fqups,event)
       elif (safe_get('LB3None',fqups) == None) and (new_status == 'LB3') :
         event = (None,'LB3');         LB3None[fqups] = 'LB3';         do_action (fqups,event)
+      elif (safe_get('LSNone',fqups) == None) and (new_status == 'LS') :
+        event = (None,'LS');          LSNone[fqups] = 'LS';           do_action (fqups,event)
       elif (safe_get('COMMNOCOMM',fqups,'COMM') == 'COMM') and (new_status == 'NOCOMM') :
-        event = ('COMM','NOCOMM');      COMMNOCOMM[fqups] = 'NOCOMM'; do_action (fqups,event)
+        event = ('COMM','NOCOMM');    COMMNOCOMM[fqups] = 'NOCOMM';   do_action (fqups,event)
       elif (safe_get('COMMNOCOMM',fqups,'COMM') == 'NOCOMM') and (new_status == 'COMM') :
-        event = ('NOCOMM','COMM');      COMMNOCOMM[fqups] = 'COMM';   do_action (fqups,event)
+        event = ('NOCOMM','COMM');    COMMNOCOMM[fqups] = 'COMM';     do_action (fqups,event)
       elif (safe_get('OFFNone',fqups) == None) and (new_status == 'OFF') :
         event = (None,'OFF');         OFFNone[fqups] = 'OFF';         do_action (fqups,event)
       elif (safe_get('OLOB',fqups,'OL') == 'OB') and (new_status == 'OL') :
@@ -3556,7 +3636,7 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
       event = ('DISCHRG',None);     DISCHRGNone[fqups] = None;      do_action (fqups,event)
     elif (safe_get('FSDNone',fqups) == 'FSD') and ('FSD' not in new_status_list) :
       event = ('FSD',None);         FSDNone[fqups] = None;          do_action (fqups,event)
-    elif (safe_get('LBNone',fqups) == 'LB') and ('LB' not in new_status_list) :
+    elif (safe_get('LBNone',fqups)  == 'LB') and ('LB' not in new_status_list) :
       event = ('LB',None);          LBNone[fqups] = None;           do_action (fqups,event)
     elif (safe_get('LB1None',fqups) == 'LB1') and ('LB1' not in new_status_list) :
       event = ('LB1',None);         LB1None[fqups] = None;          do_action (fqups,event)
@@ -3564,6 +3644,8 @@ while not SIG_called['TERM'] :     # Loop will be broken if Stop set to True
       event = ('LB2',None);         LB2None[fqups] = None;          do_action (fqups,event)
     elif (safe_get('LB3None',fqups) == 'LB3') and ('LB3' not in new_status_list) :
       event = ('LB3',None);         LB3None[fqups] = None;          do_action (fqups,event)
+    elif (safe_get('LSNone',fqups)  == 'LS') and ('LS' not in new_status_list) :
+      event = ('LS',None);          LSNone[fqups] = None;           do_action (fqups,event)
     elif (safe_get('OFFNone',fqups) == 'OFF') and ('OFF' not in new_status_list) :
       event = ('OFF',None);         OFFNone[fqups] = None;          do_action (fqups,event)
     elif (safe_get('OVERNone',fqups) == 'OVER') and ('OVER' not in new_status_list) :
